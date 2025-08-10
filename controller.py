@@ -41,24 +41,24 @@ bus = smbus.SMBus(1)
 imu = MPU9250.MPU9250(bus, address)
 imu.begin()
 
-print("Calibrating Gyro....")
-imu.caliberateGyro()  # Run once; comment out after if stable
-# Optional: Calibrate accel/mag if needed
-# imu.caliberateAccelerometer()
-# imu.caliberateMag()
-# imu.saveCalibDataToFile('/home/ubuntu/calib.json')  # Save for future loads
-# imu.loadCalibDataFromFile('/home/ubuntu/calib.json')
-print("Calibration Complete.")
+# print("Calibrating Gyro....")
+# imu.caliberateGyro()  # Run once; comment out after if stable
+# # Optional: Calibrate accel/mag if needed
+# # imu.caliberateAccelerometer()
+# # imu.caliberateMag()
+# # imu.saveCalibDataToFile('/home/ubuntu/calib.json')  # Save for future loads
+# # imu.loadCalibDataFromFile('/home/ubuntu/calib.json')
+# print("Calibration Complete.")
 
 sensorfusion = madgwick.Madgwick(0.5)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
 
 # Controller setup
 data = loadmat('controller.mat')
-K_A = np.squeeze(data['K_A'])
-K_B = np.squeeze(data['K_B'])
-K_C = np.squeeze(data['K_C'])
-K_D = np.squeeze(data['K_D'])
-K = ss(K_A, K_B, K_C, K_D)
+KA = np.squeeze(data['KA'])
+KB = np.squeeze(data['KB'])
+KC = np.squeeze(data['KC'])
+KD = np.squeeze(data['KD'])
+K = ss(KA, KB, KC, KD)
 
 Ts = 0.01  # Sampling time (s)
 Kd = c2d(K, Ts, method='tustin')
@@ -67,43 +67,43 @@ n_states = Ad.shape[0]
 x_k = np.zeros((n_states, 1))  # Initial controller state
 
 # Offsets (calibrate these!)
-pitch_offset = 4.0  # Degrees; adjust based on upright reading after inversion
-yaw_initial = 0.0   # Set in loop for relative yaw
+pitch_offset = 0.0  # Degrees; adjust based on upright reading after inversion
+yaw_initial =  0.0   # Set in loop for relative yaw
 
 # Reference (setpoint)
-r = np.array([[0.0], [0.0]])  # theta=0 (upright), psi=0 (desired yaw)
+r = np.array([[0.0], [44.0]])  # theta=0 (upright), psi=0 (desired yaw)
 
 # Motor control function (integrated and adapted from your code, using separate PWM)
 def apply_control(u):
     # u is (2,1) array: u[0] for common mode (forward/tilt control), u[1] for diff mode (yaw control)
     # Scale u to motor speeds: Assume u in [-max_u, max_u] maps to [-1,1] speed
     print('raw u', u)
-    max_u = 0.1  # Tune this based on your controller output range (e.g., from sims)
+    max_u = 1.1  # Tune this based on your controller output range (e.g., from sims)
     u_scaled = u / max_u
     print('scaled u', u_scaled)
-    left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0)  # Common + diff
-    right_speed = np.clip(u_scaled[0] - u_scaled[1], -1.0, 1.0)  # Common - diff (adjust sign if yaw direction wrong)
+    left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0).item()  # Common + diff
+    right_speed = np.clip(u_scaled[0] - u_scaled[1], -1.0, 1.0).item()  # Common - diff (adjust sign if yaw direction wrong)
 
-    # Set directions and PWM values, COMMENT THIS OUT FOR TEST
-    if left_speed > 0:
-        leftMotor.forward()
-        leftMotorpwm.value = left_speed
-    elif left_speed < 0:
-        leftMotor.backward()
-        leftMotorpwm.value = -left_speed  # abs for PWM
-    else:
-        leftMotor.stop()
-        leftMotorpwm.value = 0.0
+    # # Set directions and PWM values, COMMENT THIS OUT FOR TEST
+    # if left_speed > 0:
+    #     leftMotor.forward()
+    #     leftMotorpwm.value = left_speed
+    # elif left_speed < 0:
+    #     leftMotor.backward()
+    #     leftMotorpwm.value = -left_speed  # abs for PWM
+    # else:
+    #     leftMotor.stop()
+    #     leftMotorpwm.value = 0.0
 
-    if right_speed > 0:
-        rightMotor.forward()
-        rightMotorpwm.value = right_speed
-    elif right_speed < 0:
-        rightMotor.backward()
-        rightMotorpwm.value = -right_speed  # abs for PWM
-    else:
-        rightMotor.stop()
-        rightMotorpwm.value = 0.0
+    # if right_speed > 0:
+    #     rightMotor.forward()
+    #     rightMotorpwm.value = right_speed
+    # elif right_speed < 0:
+    #     rightMotor.backward()
+    #     rightMotorpwm.value = -right_speed  # abs for PWM
+    # else:
+    #     rightMotor.stop()
+    #     rightMotorpwm.value = 0.0
     
     # Optional: Print for debug
     print(f"Control: left_speed={left_speed:.2f}, right_speed={right_speed:.2f}")
@@ -135,7 +135,7 @@ try:
             )
 
         # Get angles in degrees, apply corrections
-        pitch = sensorfusion.pitch - pitch_offset  # Theta (tilt)
+        pitch = sensorfusion.roll - pitch_offset  # Theta (tilt)
         yaw = sensorfusion.yaw
         if first_run:
             yaw_initial = yaw  # Set initial yaw as 0 reference

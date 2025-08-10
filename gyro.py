@@ -12,7 +12,12 @@ imu.begin()
 
 print("Calibrating Gyro....")
 imu.caliberateGyro()
+print("Calibrating Magnetometer (move in figure-8 for 30-60s)....")
+imu.caliberateMagApprox()   # Run this; move sensor in figure-8
+imu.caliberateAccelerometer()  # Also calib accel for completeness
 print("Calibration Complete.")
+imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
+# imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 
 sensorfusion = madgwick.Madgwick(0.5)
 
@@ -21,15 +26,28 @@ printCount = 0
 try:
     while True:
         imu.readSensor()
-        newTime = time.time()
-        dt = newTime - currTime
-        currTime = newTime
 
-        sensorfusion.updateRollPitchYaw(
-            imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
-            imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
-            imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
-        )
+        imuAccelX = imu.AccelVals[1]
+        imuAccelY = imu.AccelVals[0]
+        imuAccelZ = -imu.AccelVals[2]
+
+        imuGyroX = imu.GyroVals[1]
+        imuGyroY = imu.GyroVals[0]
+        imuGyroZ = -imu.GyroVals[2]
+        
+        imuMagX = imu.MagVals[1]
+        imuMagY = imu.MagVals[0]
+        imuMagZ = -imu.MagVals[2]
+
+        for i in range(10):
+            newTime = time.time()
+            dt = newTime - currTime
+            currTime = newTime
+            sensorfusion.updateRollPitchYaw(
+                imuAccelX, imuAccelY, imuAccelZ,
+                imuGyroX, imuGyroY, imuGyroZ,
+                imuMagX, imuMagY, imuMagZ, dt
+            )
 
         if printCount == 2:
             print("Roll: {0:.2f} Pitch: {1:.2f} Yaw: {2:.2f}".format(
