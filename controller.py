@@ -42,13 +42,13 @@ imu = MPU9250.MPU9250(bus, address)
 imu.begin()
 
 # print("Calibrating Gyro....")
-# imu.caliberateGyro()  # Run once; comment out after if stable
-# # Optional: Calibrate accel/mag if needed
-# # imu.caliberateAccelerometer()
-# # imu.caliberateMag()
-# # imu.saveCalibDataToFile('/home/ubuntu/calib.json')  # Save for future loads
-# # imu.loadCalibDataFromFile('/home/ubuntu/calib.json')
+# imu.caliberateGyro()
+# print("Calibrating Magnetometer....")
+# imu.caliberateMagApprox()   # Run this; move sensor in figure-8
+# imu.caliberateAccelerometer()  # Also calib accel for completeness
 # print("Calibration Complete.")
+# imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
+imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 
 sensorfusion = madgwick.Madgwick(0.5)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
 
@@ -66,12 +66,10 @@ Ad, Bd, Cd, Dd = Kd.A, Kd.B, Kd.C, Kd.D
 n_states = Ad.shape[0]
 x_k = np.zeros((n_states, 1))  # Initial controller state
 
-# Offsets (calibrate these!)
-pitch_offset = 0.0  # Degrees; adjust based on upright reading after inversion
 yaw_initial =  0.0   # Set in loop for relative yaw
 
 # Reference (setpoint)
-r = np.array([[0.0], [44.0]])  # theta=0 (upright), psi=0 (desired yaw)
+r = np.array([[0.0], [180.0]])  # theta=0 (upright), psi=0 (desired yaw)
 
 # Motor control function (integrated and adapted from your code, using separate PWM)
 def apply_control(u):
@@ -117,25 +115,19 @@ try:
 
         # Read IMU
         imu.readSensor()
-        newTime = time.time()
-        dt = newTime - currTime
-        currTime = newTime
 
-        # Handle inverted mounting: Invert z-axis for NED alignment
-        imu.AccelVals[2] = -imu.AccelVals[2]
-        imu.GyroVals[2] = -imu.GyroVals[2]
-        imu.MagVals[2] = -imu.MagVals[2]
-
-        # Update fusion (run multiple times for stability if dt is small)
-        for _ in range(5):  # Adjust (e.g., 10) for smoother output
+        for i in range(10):
+            newTime = time.time()
+            dt = newTime - currTime
+            currTime = newTime
             sensorfusion.updateRollPitchYaw(
                 imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
                 imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
-                imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt / 5
+                imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
             )
 
         # Get angles in degrees, apply corrections
-        pitch = sensorfusion.roll - pitch_offset  # Theta (tilt)
+        pitch = sensorfusion.pitch # Theta (tilt)
         yaw = sensorfusion.yaw
         if first_run:
             yaw_initial = yaw  # Set initial yaw as 0 reference
