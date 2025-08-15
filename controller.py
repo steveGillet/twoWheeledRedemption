@@ -53,7 +53,7 @@ imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 sensorfusion = madgwick.Madgwick(0.5)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
 
 # Controller setup
-data = loadmat('controller.mat')
+data = loadmat('hInfSynController.mat')
 KA = np.squeeze(data['KA'])
 KB = np.squeeze(data['KB'])
 KC = np.squeeze(data['KC'])
@@ -76,7 +76,7 @@ def apply_control(u):
     # u is (2,1) array: u[0] for common mode (forward/tilt control), u[1] for diff mode (yaw control)
     # Scale u to motor speeds: Assume u in [-max_u, max_u] maps to [-1,1] speed
     print('raw u', u)
-    max_u = .1
+    max_u = 50
     u_scaled = u / max_u
     print('scaled u', u_scaled)
     left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0).item()  # Common + diff
