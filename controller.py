@@ -1,4 +1,5 @@
-import os
+#!/usr/bin/env python3
+
 import sys
 import time
 import smbus
@@ -11,8 +12,8 @@ from gpiozero import Motor, PWMOutputDevice, DigitalInputDevice
 
 rightMotor = Motor(13, 6)
 leftMotor = Motor(19, 26)
-rightMotorpwm = PWMOutputDevice(20)
-leftMotorpwm = PWMOutputDevice(21)
+rightMotorpwm = PWMOutputDevice(20, frequency=1000)  # 20000 cap
+leftMotorpwm = PWMOutputDevice(21, frequency=1000)
 
 class Encoder:
     def __init__(self, pinNumberA, pinNumberB):
@@ -76,7 +77,7 @@ def apply_control(u):
     # u is (2,1) array: u[0] for common mode (forward/tilt control), u[1] for diff mode (yaw control)
     # Scale u to motor speeds: Assume u in [-max_u, max_u] maps to [-1,1] speed
     print('raw u', u)
-    max_u = 50
+    max_u = 2.65 # stall torque Nm
     u_scaled = u / max_u
     print('scaled u', u_scaled)
     left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0).item()  # Common + diff
