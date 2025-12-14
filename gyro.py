@@ -11,14 +11,14 @@ bus = smbus.SMBus(1)
 imu = MPU9250.MPU9250(bus, address)
 imu.begin()
 
-# print("Calibrating Gyro....")
-# imu.caliberateGyro()
-# print("Calibrating Magnetometer....")
-# imu.caliberateMagApprox()   # Run this; move sensor in figure-8
-# imu.caliberateAccelerometer()  # Also calib accel for completeness
-# print("Calibration Complete.")
-# imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
-imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
+print("Calibrating Gyro....")
+imu.caliberateGyro()
+print("Calibrating Magnetometer....")
+imu.caliberateMagApprox()   # Run this; move sensor in figure-8
+imu.caliberateAccelerometer()  # Also calib accel for completeness
+print("Calibration Complete.")
+imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
+# imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 
 sensorfusion = madgwick.Madgwick(0.5)
 # sensorfusion = kalman.Kalman()

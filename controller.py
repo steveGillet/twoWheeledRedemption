@@ -51,7 +51,7 @@ imu.begin()
 # imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
 imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 
-sensorfusion = madgwick.Madgwick(0.5)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
+sensorfusion = madgwick.Madgwick(0.8)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
 
 # Controller setup
 data = loadmat('hInfSynController.mat')
@@ -134,18 +134,18 @@ try:
     while True:
         start_time = time.time()
 
+        newTime = time.time()
+        dt = newTime - currTime
+        currTime = newTime
+
         # Read IMU
         imu.readSensor()
 
-        for i in range(10):
-            newTime = time.time()
-            dt = newTime - currTime
-            currTime = newTime
-            sensorfusion.updateRollPitchYaw(
-                imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
-                imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
-                imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
-            )
+        sensorfusion.updateRollPitchYaw(
+            imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
+            imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
+            imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
+        )
 
         # Get angles in degrees, apply corrections
         pitch = sensorfusion.pitch # Theta (tilt)
