@@ -1,0 +1,14 @@
+[Unit]
+Description=Two-Wheeled Robot Controller
+After=multi-user.target  # Starts after boot completes
+After=nss-user-lookup.target
+
+[Service]
+WorkingDirectory=/home/steve/Desktop/twoWheeledRedemption
+ExecStart=/bin/bash -c 'source venv/bin/activate && python3 controller.py'
+ExecStop=/home/steve/Desktop/twoWheeledRedemption/venv/bin/python3 /home/steve/Desktop/twoWheeledRedemption/stop_motors.py
+Restart=always  # Restart if crashes
+RestartSec=5  # Wait 5s before restart
+
+[Install]
+WantedBy=multi-user.target

@@ -1,22 +1,50 @@
 #!/usr/bin/env python3
+"""H-infinity balance controller for the two-wheeled robot.
 
+IMU setup matches gyro.py: no live calibration here. Interactive gyro and
+figure-eight magnetometer calibration is calibrate.py, which writes
+calib.json.
+
+Loading:
+  - Default: load calib.json if it exists; otherwise IMU default scale/bias.
+  - --load-calib [PATH]: load that file; error if missing.
+  - --no-calib: never load a file.
+
+imusensor Madgwick(b=...) currently ignores `b` and uses beta ~0.60 from
+GyroMeasError. The 0.8 argument is kept for compatibility and does not
+change the filter gain.
+"""
+
+from __future__ import annotations
+
+import argparse
 import sys
 import time
-import smbus
+from pathlib import Path
+
 import numpy as np
-from imusensor.MPU9250 import MPU9250
-from imusensor.filters import madgwick
 from scipy.io import loadmat
 from control import ss, c2d
-from gpiozero import Motor, PWMOutputDevice, DigitalInputDevice
 
-rightMotor = Motor(13, 6)
-leftMotor = Motor(19, 26)
-rightMotorpwm = PWMOutputDevice(20, frequency=1000)  # 20000 cap
-leftMotorpwm = PWMOutputDevice(21, frequency=1000)
+import gyro
+
+Ts = 0.01  # Sampling time (s)
+MAX_U = 2.65  # stall torque Nm
+WARM_UP_SECONDS = 3.0
+CONTROLLER_MAT = Path("hInfSynController.mat")
+MADGWICK_B = 0.8  # constructor arg only; imusensor does not apply this to beta
+
+rightMotor = None
+leftMotor = None
+rightMotorpwm = None
+leftMotorpwm = None
+rightEncoder = None
+
 
 class Encoder:
     def __init__(self, pinNumberA, pinNumberB):
+        from gpiozero import DigitalInputDevice
+
         self.counter = 0
         self.encoderInputA = DigitalInputDevice(pinNumberA)
         self.encoderInputA.when_activated = self.cycleCount
@@ -25,61 +53,112 @@ class Encoder:
 
     def cycleCount(self):
         self.counter += 1
-        if (self.encoderInputB.value == 0):
+        if self.encoderInputB.value == 0:
             self.direction = "backward"
         else:
             self.direction = "forward"
-        if (self.counter >= 1120):
+        if self.counter >= 1120:
             print("One cycle completed")
             self.counter = 0
             print("I am moving ", self.direction)
 
-rightEncoder = Encoder(14, 15)
 
-# IMU setup
-address = 0x68
-bus = smbus.SMBus(1)
-imu = MPU9250.MPU9250(bus, address)
-imu.begin()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Balance controller. Loads calib.json like gyro.py; "
+            "does not run live IMU calibration."
+        )
+    )
+    parser.add_argument(
+        "--load-calib",
+        nargs="?",
+        const=str(gyro.DEFAULT_CALIB),
+        default=None,
+        metavar="PATH",
+        help=(
+            "Load a calib.json. If PATH is omitted, use the project file. "
+            "Fails if the file is missing. Without this flag, the project "
+            "file is still loaded when it exists."
+        ),
+    )
+    parser.add_argument(
+        "--calib",
+        type=Path,
+        default=None,
+        help="Same as --load-calib PATH.",
+    )
+    parser.add_argument(
+        "--no-calib",
+        action="store_true",
+        help="Do not load calib.json; use IMU default scale/bias.",
+    )
+    parser.add_argument("--bus", type=int, default=gyro.I2C_BUS)
+    parser.add_argument(
+        "--address", type=lambda s: int(s, 0), default=gyro.IMU_ADDRESS
+    )
+    parser.add_argument(
+        "--mat",
+        type=Path,
+        default=CONTROLLER_MAT,
+        help="Discrete H-infinity controller .mat (KA, KB, KC, KD).",
+    )
+    return parser.parse_args(argv)
 
-# print("Calibrating Gyro....")
-# imu.caliberateGyro()
-# print("Calibrating Magnetometer....")
-# imu.caliberateMagApprox()   # Run this; move sensor in figure-8
-# imu.caliberateAccelerometer()  # Also calib accel for completeness
-# print("Calibration Complete.")
-# imu.saveCalibDataToFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')  # Save for future runs
-imu.loadCalibDataFromFile('/home/steve/Desktop/twoWheeledRedemption/calib.json')
 
-sensorfusion = madgwick.Madgwick(0.8)  # Beta=0.5; adjust if needed for smoothness vs. accuracy
+def setup_imu(
+    calib: Path | None,
+    *,
+    require_calib: bool = False,
+    bus_id: int = gyro.I2C_BUS,
+    address: int = gyro.IMU_ADDRESS,
+    imu=None,
+):
+    """Open MPU9250 without live calib, optionally load calib.json."""
+    return gyro.open_imu(
+        bus_id=bus_id,
+        address=address,
+        calib=calib,
+        imu=imu,
+        require_calib=require_calib,
+    )
 
-# Controller setup
-data = loadmat('hInfSynController.mat')
-KA = np.squeeze(data['KA'])
-KB = np.squeeze(data['KB'])
-KC = np.squeeze(data['KC'])
-KD = np.squeeze(data['KD'])
-K = ss(KA, KB, KC, KD)
 
-Ts = 0.01  # Sampling time (s)
-Kd = c2d(K, Ts, method='tustin')
-Ad, Bd, Cd, Dd = Kd.A, Kd.B, Kd.C, Kd.D
-n_states = Ad.shape[0]
-x_k = np.zeros((n_states, 1))  # Initial controller state
+def setup_fusion():
+    """Madgwick filter for tilt (theta) and yaw (psi)."""
+    return gyro.make_fusion(MADGWICK_B)
 
-yaw_initial =  0.0   # Set in loop for relative yaw
 
-# Reference (setpoint)
-r = np.array([[0.0], [0.0]])  # theta=0 (upright), psi=0 (desired yaw)
+def load_hinf(mat_path: Path = CONTROLLER_MAT, ts: float = Ts):
+    """Load continuous H-infinity matrices and discretize with Tustin."""
+    data = loadmat(str(mat_path))
+    KA = np.squeeze(data["KA"])
+    KB = np.squeeze(data["KB"])
+    KC = np.squeeze(data["KC"])
+    KD = np.squeeze(data["KD"])
+    K = ss(KA, KB, KC, KD)
+    Kd = c2d(K, ts, method="tustin")
+    return Kd.A, Kd.B, Kd.C, Kd.D
 
-# Motor control function (integrated and adapted from your code, using separate PWM)
+
+def setup_motors():
+    """GPIO motors and one wheel encoder. Called only from main()."""
+    global rightMotor, leftMotor, rightMotorpwm, leftMotorpwm, rightEncoder
+    from gpiozero import Motor, PWMOutputDevice
+
+    rightMotor = Motor(13, 6)
+    leftMotor = Motor(19, 26)
+    rightMotorpwm = PWMOutputDevice(20, frequency=1000)  # 20000 cap
+    leftMotorpwm = PWMOutputDevice(21, frequency=1000)
+    rightEncoder = Encoder(14, 15)
+
+
 def apply_control(u):
     # u is (2,1) array: u[0] for common mode (forward/tilt control), u[1] for diff mode (yaw control)
     # Scale u to motor speeds: Assume u in [-max_u, max_u] maps to [-1,1] speed
-    print('raw u', u)
-    max_u = 2.65 # stall torque Nm
-    u_scaled = u / max_u
-    print('scaled u', u_scaled)
+    print("raw u", u)
+    u_scaled = u / MAX_U
+    print("scaled u", u_scaled)
     left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0).item()  # Common + diff
     right_speed = np.clip(u_scaled[0] - u_scaled[1], -1.0, 1.0).item()  # Common - diff (adjust sign if yaw direction wrong)
 
@@ -103,84 +182,99 @@ def apply_control(u):
     else:
         rightMotor.stop()
         rightMotorpwm.value = 0.0
-    
-    # Optional: Print for debug
+
     print(f"Control: left_speed={left_speed:.2f}, right_speed={right_speed:.2f}")
+    return left_speed, right_speed
 
-print("Warming up sensor fusion (keep robot still)...")
-warm_up_seconds = 3.0  # Adjust as needed
-warm_up_steps = int(warm_up_seconds / Ts)
-pitch_samples = []
-currTime = time.time()
-for _ in range(warm_up_steps):
-    imu.readSensor()
-    newTime = time.time()
-    dt = newTime - currTime
-    currTime = newTime
-    sensorfusion.updateRollPitchYaw(
-        imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
-        imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
-        imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
-    )
-    pitch_samples.append(sensorfusion.pitch)  # Collect for offset
-    time.sleep(Ts)
 
-print("Worm")
-
-# Main control loop
-currTime = time.time()
-first_run = True
-try:
-    while True:
-        start_time = time.time()
-
+def warm_up(imu, sensorfusion, ts: float = Ts, seconds: float = WARM_UP_SECONDS):
+    """Prime Madgwick while the robot is still. Does not calibrate the IMU."""
+    print("Warming up sensor fusion (keep robot still)...")
+    warm_up_steps = int(seconds / ts)
+    pitch_samples = []
+    currTime = time.time()
+    for _ in range(warm_up_steps):
         newTime = time.time()
         dt = newTime - currTime
         currTime = newTime
+        sample = gyro.fuse_sample(imu, sensorfusion, dt)
+        pitch_samples.append(sample["pitch"])
+        time.sleep(ts)
+    print("Warm-up complete")
+    return pitch_samples
 
-        # Read IMU
-        imu.readSensor()
 
-        sensorfusion.updateRollPitchYaw(
-            imu.AccelVals[0], imu.AccelVals[1], imu.AccelVals[2],
-            imu.GyroVals[0], imu.GyroVals[1], imu.GyroVals[2],
-            imu.MagVals[0], imu.MagVals[1], imu.MagVals[2], dt
-        )
+def control_step(sample, yaw_initial, r, Ad, Bd, Cd, Dd, x_k, first_run):
+    """One balance iteration from a fused IMU sample. Returns updated state."""
+    pitch = sample["pitch"]  # Theta (tilt), degrees
+    yaw = sample["yaw"]
+    if first_run:
+        yaw_initial = yaw
+        first_run = False
+    yaw_relative = yaw - yaw_initial  # Psi (relative yaw)
+    print(f"Pitch: {pitch:.2f}, Yaw: {yaw_relative:.2f}")
 
-        # Get angles in degrees, apply corrections
-        pitch = sensorfusion.pitch # Theta (tilt)
-        yaw = sensorfusion.yaw
-        if first_run:
-            yaw_initial = yaw  # Set initial yaw as 0 reference
-            first_run = False
-        yaw_relative = yaw - yaw_initial  # Psi (relative yaw)
-        print(f"Pitch: {pitch:.2f}, Yaw: {yaw_relative:.2f}")
+    theta_rad = np.deg2rad(pitch)
+    psi_rad = np.deg2rad(yaw_relative)
+    y = np.array([[theta_rad], [psi_rad]])
+    e = r - y
+    u = Cd @ x_k + Dd @ e
+    x_k = Ad @ x_k + Bd @ e
+    return u, x_k, yaw_initial, first_run, yaw_relative
 
-        # Convert to radians for controller
-        theta_rad = np.deg2rad(pitch)
-        psi_rad = np.deg2rad(yaw_relative)
 
-        # Sensor output y (shape (2,1))
-        y = np.array([[theta_rad], [psi_rad]])
+def stop_motors():
+    if rightMotor is not None:
+        rightMotor.stop()
+    if leftMotor is not None:
+        leftMotor.stop()
+    if rightMotorpwm is not None:
+        rightMotorpwm.value = 0.0
+    if leftMotorpwm is not None:
+        leftMotorpwm.value = 0.0
 
-        # Control computation
-        e = r - y  # Error
-        u = Cd @ x_k + Dd @ e
-        x_k = Ad @ x_k + Bd @ e
 
-        # Apply to hardware
-        apply_control(u)
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    path, required = gyro.resolve_calib_args(args)
+    imu = setup_imu(
+        path,
+        require_calib=required,
+        bus_id=args.bus,
+        address=args.address,
+    )
+    sensorfusion = setup_fusion()
 
-        # Maintain Ts
-        elapsed = time.time() - start_time
-        if elapsed < Ts:
-            time.sleep(Ts - elapsed)
+    Ad, Bd, Cd, Dd = load_hinf(args.mat, Ts)
+    n_states = Ad.shape[0]
+    x_k = np.zeros((n_states, 1))
+    yaw_initial = 0.0
+    r = np.array([[0.0], [0.0]])  # theta=0 (upright), psi=0 (desired yaw)
 
-except KeyboardInterrupt:
-    print("Terminated")
-    # Stop motors on exit
-    rightMotor.stop()
-    leftMotor.stop()
-    rightMotorpwm.value = 0.0
-    leftMotorpwm.value = 0.0
-    sys.exit()
+    setup_motors()
+    warm_up(imu, sensorfusion, Ts, WARM_UP_SECONDS)
+
+    currTime = time.time()
+    first_run = True
+    try:
+        while True:
+            start_time = time.time()
+            newTime = time.time()
+            dt = newTime - currTime
+            currTime = newTime
+            sample = gyro.fuse_sample(imu, sensorfusion, dt)
+            u, x_k, yaw_initial, first_run, _yaw_relative = control_step(
+                sample, yaw_initial, r, Ad, Bd, Cd, Dd, x_k, first_run
+            )
+            apply_control(u)
+            elapsed = time.time() - start_time
+            if elapsed < Ts:
+                time.sleep(Ts - elapsed)
+    except KeyboardInterrupt:
+        print("Terminated")
+        stop_motors()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
