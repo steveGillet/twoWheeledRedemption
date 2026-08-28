@@ -10,27 +10,39 @@ Loading:
   - --load-calib [PATH]: load that file; error if it is missing.
   - --no-calib: ignore any calib file and use IMU default scale/bias.
 
-Note: imusensor's MPU9250.begin() normally calls caliberateGyro() at the
-end (a still-bias estimate). This test mode replaces that with a no-op
-before begin() so register setup still happens without a live calib pass.
+Madgwick beta lives here (MADGWICK_B). imusensor ignores the constructor
+argument, so make_fusion() assigns fusion.beta after construction.
+
+Pitch zero: rest the chassis in the upright pose with wheels off, then
+run --calibrate-pitch. That stores an offset subtracted from fused pitch.
+
+Prints go through logger.log() and are off by default. Pass --verbose to
+enable, optionally --print-period SEC to throttle.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Protocol
 
+from logger import add_print_args, apply_print_args, log
+
 I2C_BUS = 1
 IMU_ADDRESS = 0x68
 SAMPLE_PERIOD_S = 0.01
-# Passed to Madgwick(b=...). Current imusensor ignores `b` and sets
-# beta from GyroMeasError = pi * (40/180), so beta is about 0.60.
-MADGWICK_B = 0.5
-DEFAULT_CALIB = Path("/home/steve/Desktop/twoWheeledRedemption/calib.json")
+# Live Madgwick gain. Applied in make_fusion() because imusensor ignores b.
+MADGWICK_B = 0.9
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+DEFAULT_CALIB = CONFIG_DIR / "calib.json"
+DEFAULT_PITCH_OFFSET = CONFIG_DIR / "pitch_offset.json"
+PITCH_CALIB_SETTLE_S = 2.0
+PITCH_CALIB_MEASURE_S = 3.0
 
 
 class IMULike(Protocol):
@@ -47,6 +59,7 @@ class FusionLike(Protocol):
     roll: float
     pitch: float
     yaw: float
+    beta: float
 
     def updateRollPitchYaw(
         self,
@@ -67,6 +80,10 @@ def calib_path() -> Path:
     return Path(os.environ.get("GYRO_CALIB", str(DEFAULT_CALIB)))
 
 
+def pitch_offset_path() -> Path:
+    return Path(os.environ.get("GYRO_PITCH_OFFSET", str(DEFAULT_PITCH_OFFSET)))
+
+
 def skip_live_calibration(imu: Any) -> None:
     """Disable imusensor live calib so begin() does not estimate gyro bias."""
     imu.caliberateGyro = lambda *args, **kwargs: None
@@ -80,7 +97,7 @@ def load_saved_calib(
     path: Path | None,
     *,
     required: bool = False,
-    printer=print,
+    printer=log,
 ) -> bool:
     """Load a calib.json written by calibrate.py.
 
@@ -103,15 +120,49 @@ def load_saved_calib(
     return True
 
 
-def make_fusion(beta_arg: float = MADGWICK_B):
-    """Build a Madgwick filter.
+def load_pitch_offset(
+    path: Path | None = None,
+    *,
+    printer=log,
+) -> float:
+    """Load stored pitch offset in degrees. Missing file means 0.0."""
+    if path is None:
+        path = pitch_offset_path()
+    if not path.is_file():
+        printer("No pitch offset file; using 0.0 deg.")
+        return 0.0
+    data = json.loads(path.read_text(encoding="utf-8"))
+    offset = float(data.get("pitch_offset_deg", 0.0))
+    printer(f"Loaded pitch offset {offset:.3f} deg from {path}")
+    return offset
 
-    `beta_arg` is the constructor argument. imusensor currently comments
-    out `self.beta = b`, so the live gain is the library default (~0.60).
+
+def save_pitch_offset(
+    offset: float,
+    path: Path | None = None,
+    *,
+    printer=log,
+) -> Path:
+    """Write pitch offset in degrees."""
+    if path is None:
+        path = pitch_offset_path()
+    payload = {"pitch_offset_deg": float(offset)}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    printer(f"Saved pitch offset {offset:.3f} deg to {path}")
+    return path
+
+
+def make_fusion(beta_arg: float = MADGWICK_B):
+    """Build a Madgwick filter and apply MADGWICK_B.
+
+    imusensor comments out `self.beta = b` in the constructor, so the
+    live gain is set on the instance after creation.
     """
     from imusensor.filters import madgwick
 
-    return madgwick.Madgwick(beta_arg)
+    fusion = madgwick.Madgwick(beta_arg)
+    fusion.beta = float(beta_arg)
+    return fusion
 
 
 def open_imu(
@@ -141,11 +192,17 @@ def open_imu(
     return imu
 
 
-def fuse_sample(imu: IMULike, fusion: FusionLike, dt: float) -> dict[str, Any]:
+def fuse_sample(
+    imu: IMULike,
+    fusion: FusionLike,
+    dt: float,
+    pitch_offset: float = 0.0,
+) -> dict[str, Any]:
     """Read the IMU once and apply one Madgwick update.
 
     dt is the time since the previous sample in seconds. A single update
     is used (the old test loop applied the same reading ten times).
+    pitch is fused pitch minus pitch_offset (degrees).
     """
     if dt <= 0:
         dt = SAMPLE_PERIOD_S
@@ -162,12 +219,16 @@ def fuse_sample(imu: IMULike, fusion: FusionLike, dt: float) -> dict[str, Any]:
         imu.MagVals[2],
         dt,
     )
+    raw_pitch = float(fusion.pitch)
+    offset = float(pitch_offset)
     return {
         "accel": tuple(float(v) for v in imu.AccelVals),
         "gyro": tuple(float(v) for v in imu.GyroVals),
         "mag": tuple(float(v) for v in imu.MagVals),
         "roll": float(fusion.roll),
-        "pitch": float(fusion.pitch),
+        "pitch_raw": raw_pitch,
+        "pitch": raw_pitch - offset,
+        "pitch_offset": offset,
         "yaw": float(fusion.yaw),
         "dt": float(dt),
     }
@@ -180,13 +241,67 @@ def format_sample(sample: dict[str, Any]) -> str:
     )
 
 
+def calibrate_pitch_offset(
+    imu: IMULike,
+    fusion: FusionLike,
+    *,
+    settle_s: float = PITCH_CALIB_SETTLE_S,
+    measure_s: float = PITCH_CALIB_MEASURE_S,
+    period: float = SAMPLE_PERIOD_S,
+    path: Path | None = None,
+    printer=log,
+) -> float:
+    """Average fused pitch while still and store it as the zero offset.
+
+    Rest the robot in the pose that should read as standing-straight
+    (wheels off so it cannot roll). After this, that pose reports ~0.
+    """
+    printer(
+        "Pitch calibration: rest the robot still in the upright/zero-tilt "
+        "pose with wheels off so it cannot roll."
+    )
+    settle_n = max(1, int(settle_s / period))
+    measure_n = max(1, int(measure_s / period))
+    now = time.time()
+    printer(f"Settling filter for {settle_s:.1f}s...")
+    for _ in range(settle_n):
+        start = time.time()
+        new = time.time()
+        dt = new - now
+        now = new
+        fuse_sample(imu, fusion, dt, pitch_offset=0.0)
+        elapsed = time.time() - start
+        if elapsed < period:
+            time.sleep(period - elapsed)
+    printer(f"Averaging pitch for {measure_s:.1f}s...")
+    pitches: list[float] = []
+    for _ in range(measure_n):
+        start = time.time()
+        new = time.time()
+        dt = new - now
+        now = new
+        sample = fuse_sample(imu, fusion, dt, pitch_offset=0.0)
+        pitches.append(float(sample["pitch_raw"]))
+        elapsed = time.time() - start
+        if elapsed < period:
+            time.sleep(period - elapsed)
+    offset = float(sum(pitches) / len(pitches))
+    save_pitch_offset(offset, path=path, printer=printer)
+    printer(
+        f"Average pitch {offset:.3f} deg stored. "
+        "This pose should now read near zero."
+    )
+    return offset
+
+
 def run_loop(
     imu: IMULike,
     fusion: FusionLike,
     *,
     period: float = SAMPLE_PERIOD_S,
     samples: int = 0,
-    printer=print,
+    pitch_offset: float = 0.0,
+    printer=log,
 ) -> int:
     """Print fused angles. samples=0 runs until Ctrl-C."""
     printer("IMU test mode: no live calibration (use calibrate.py for that).")
@@ -199,7 +314,7 @@ def run_loop(
             new = time.time()
             dt = new - now
             now = new
-            sample = fuse_sample(imu, fusion, dt)
+            sample = fuse_sample(imu, fusion, dt, pitch_offset=pitch_offset)
             printer(format_sample(sample))
             count += 1
             elapsed = time.time() - start
@@ -252,8 +367,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not load calib.json; use IMU default scale/bias.",
     )
+    parser.add_argument(
+        "--calibrate-pitch",
+        action="store_true",
+        help=(
+            "Average fused pitch while still and save pitch_offset.json. "
+            "Rest the robot in the upright pose with wheels off. No motors."
+        ),
+    )
+    parser.add_argument(
+        "--no-pitch-offset",
+        action="store_true",
+        help="Do not load or apply pitch_offset.json.",
+    )
     parser.add_argument("--bus", type=int, default=I2C_BUS)
     parser.add_argument("--address", type=lambda s: int(s, 0), default=IMU_ADDRESS)
+    add_print_args(parser)
     return parser.parse_args(argv)
 
 
@@ -270,6 +399,7 @@ def resolve_calib_args(args: argparse.Namespace) -> tuple[Path | None, bool]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    apply_print_args(args)
     path, required = resolve_calib_args(args)
     imu = open_imu(
         bus_id=args.bus,
@@ -278,7 +408,17 @@ def main(argv: list[str] | None = None) -> int:
         require_calib=required,
     )
     fusion = make_fusion()
-    run_loop(imu, fusion, period=args.period, samples=args.samples)
+    if args.calibrate_pitch:
+        calibrate_pitch_offset(imu, fusion, period=args.period)
+        return 0
+    offset = 0.0 if args.no_pitch_offset else load_pitch_offset()
+    run_loop(
+        imu,
+        fusion,
+        period=args.period,
+        samples=args.samples,
+        pitch_offset=offset,
+    )
     return 0
 
 

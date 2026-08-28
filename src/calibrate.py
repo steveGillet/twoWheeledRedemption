@@ -3,7 +3,7 @@
 
 This is the only script that runs live calibration. Keep the robot still
 for gyro bias, then move it in a figure-eight for magnetometer hard/soft
-iron. Results are written to calib.json.
+iron. Results are written to config/calib.json.
 
 gyro.py never calibrates. It only optionally loads this file for a
 non-calibrating read/test loop.
@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         run_mag=True,
         prompt=prompt,
     )
-    print("Done. Use: python gyro.py --load-calib")
+    print("Done. Use: PYTHONPATH=src python scripts/run_gyro.py --load-calib")
     return 0
 
 

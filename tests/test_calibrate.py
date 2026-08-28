@@ -10,8 +10,11 @@ from unittest.mock import MagicMock
 from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for _p in (ROOT, SRC):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
 import calibrate  # noqa: E402
 

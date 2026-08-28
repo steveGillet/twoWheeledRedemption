@@ -10,10 +10,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for _p in (ROOT, SRC):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
 import gyro  # noqa: E402
+import logger  # noqa: E402
 
 
 class FakeIMU:
@@ -269,6 +273,99 @@ class TestMakeFusion(unittest.TestCase):
             self.skipTest("imusensor not installed")
         self.assertTrue(hasattr(fusion, "updateRollPitchYaw"))
         self.assertTrue(hasattr(fusion, "roll"))
+
+    def test_make_fusion_applies_madgwick_b(self):
+        try:
+            fusion = gyro.make_fusion()
+        except ImportError:
+            self.skipTest("imusensor not installed")
+        self.assertAlmostEqual(float(fusion.beta), gyro.MADGWICK_B, places=6)
+
+
+class TestPitchOffset(unittest.TestCase):
+    def test_fuse_sample_subtracts_offset(self):
+        imu = FakeIMU()
+        fusion = FakeFusion()
+        sample = gyro.fuse_sample(imu, fusion, 0.01, pitch_offset=-2.25)
+        self.assertEqual(sample["pitch_raw"], -2.25)
+        self.assertAlmostEqual(sample["pitch"], 0.0)
+        self.assertAlmostEqual(sample["pitch_offset"], -2.25)
+
+    def test_save_and_load_roundtrip(self):
+        path = Path("/tmp/pitch_offset_roundtrip.json")
+        try:
+            gyro.save_pitch_offset(4.5, path=path, printer=lambda *_a, **_k: None)
+            val = gyro.load_pitch_offset(path, printer=lambda *_a, **_k: None)
+            self.assertAlmostEqual(val, 4.5)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_missing_file_is_zero(self):
+        val = gyro.load_pitch_offset(
+            Path("/tmp/does-not-exist-pitch-offset.json"),
+            printer=lambda *_a, **_k: None,
+        )
+        self.assertEqual(val, 0.0)
+
+    def test_calibrate_averages_fake_pitch(self):
+        imu = FakeIMU()
+        fusion = FakeFusion()
+        path = Path("/tmp/pitch_offset_cal.json")
+        try:
+            with patch("gyro.time.sleep", return_value=None):
+                offset = gyro.calibrate_pitch_offset(
+                    imu,
+                    fusion,
+                    settle_s=0.02,
+                    measure_s=0.02,
+                    period=0.01,
+                    path=path,
+                    printer=lambda *_a, **_k: None,
+                )
+            self.assertAlmostEqual(offset, -2.25)
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertAlmostEqual(loaded["pitch_offset_deg"], -2.25)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_calibrate_pitch_flag(self):
+        args = gyro.parse_args(["--calibrate-pitch"])
+        self.assertTrue(args.calibrate_pitch)
+
+
+class TestLogHelper(unittest.TestCase):
+    def setUp(self):
+        logger.configure_prints(enabled=False, period_s=0.0)
+
+    def tearDown(self):
+        logger.configure_prints(enabled=False, period_s=0.0)
+
+    def test_disabled_by_default(self):
+        self.assertFalse(logger.PRINTS_ENABLED)
+        with patch("builtins.print") as mocked:
+            logger.log("hello")
+            mocked.assert_not_called()
+
+    def test_enabled_prints(self):
+        logger.configure_prints(enabled=True)
+        with patch("builtins.print") as mocked:
+            logger.log("hello")
+            mocked.assert_called_once()
+
+    def test_throttle_skips_second_call(self):
+        logger.configure_prints(enabled=True, period_s=10.0)
+        with patch("builtins.print") as mocked:
+            logger.log("a")
+            logger.log("b")
+            self.assertEqual(mocked.call_count, 1)
+
+    def test_verbose_flag_enables(self):
+        args = gyro.parse_args(["--verbose", "--print-period", "0.5"])
+        self.assertTrue(args.verbose)
+        self.assertAlmostEqual(args.print_period, 0.5)
+        logger.apply_print_args(args)
+        self.assertTrue(logger.PRINTS_ENABLED)
+        self.assertAlmostEqual(logger.PRINT_PERIOD_S, 0.5)
 
 
 if __name__ == "__main__":

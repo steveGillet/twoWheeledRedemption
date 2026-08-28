@@ -12,14 +12,17 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for _p in (ROOT, SRC):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
 import gyro  # noqa: E402
 import controller  # noqa: E402
 from tests.test_gyro import FakeIMU, FakeFusion  # noqa: E402
 
-MAT_PATH = ROOT / "hInfSynController.mat"
+MAT_PATH = ROOT / "config" / "hInfSynController.mat"
 
 
 def _mock_motors():
@@ -283,6 +286,30 @@ class TestStopMotors(unittest.TestCase):
         controller.leftMotorpwm = None
         controller.rightMotorpwm = None
         controller.stop_motors()
+
+
+class TestPitchCalibFlags(unittest.TestCase):
+    def test_calibrate_pitch_flag(self):
+        args = controller.parse_args(["--calibrate-pitch"])
+        self.assertTrue(args.calibrate_pitch)
+
+    def test_no_pitch_offset_flag(self):
+        args = controller.parse_args(["--no-pitch-offset"])
+        self.assertTrue(args.no_pitch_offset)
+
+    def test_verbose_flag(self):
+        args = controller.parse_args(["--verbose", "--print-period", "0.2"])
+        self.assertTrue(args.verbose)
+        self.assertAlmostEqual(args.print_period, 0.2)
+
+
+class TestSetupFusion(unittest.TestCase):
+    def test_setup_fusion_uses_gyro_beta(self):
+        try:
+            fusion = controller.setup_fusion()
+        except ImportError:
+            self.skipTest("imusensor not installed")
+        self.assertAlmostEqual(float(fusion.beta), gyro.MADGWICK_B, places=6)
 
 
 if __name__ == "__main__":

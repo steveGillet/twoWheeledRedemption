@@ -1,0 +1,16 @@
+[Unit]
+Description=Two-Wheeled Robot Controller
+After=multi-user.target
+After=nss-user-lookup.target
+
+[Service]
+WorkingDirectory=/home/steve/Desktop/twoWheeledRedemption
+Environment=PYTHONPATH=/home/steve/Desktop/twoWheeledRedemption/src
+ExecStart=/home/steve/Desktop/twoWheeledRedemption/venv/bin/python3 /home/steve/Desktop/twoWheeledRedemption/scripts/run_controller.py
+ExecStop=/home/steve/Desktop/twoWheeledRedemption/venv/bin/python3 /home/steve/Desktop/twoWheeledRedemption/src/stop_motors.py
+KillSignal=SIGINT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -10,9 +10,11 @@ Loading:
   - --load-calib [PATH]: load that file; error if missing.
   - --no-calib: never load a file.
 
-imusensor Madgwick(b=...) currently ignores `b` and uses beta ~0.60 from
-GyroMeasError. The 0.8 argument is kept for compatibility and does not
-change the filter gain.
+Madgwick beta is gyro.MADGWICK_B, applied in gyro.make_fusion().
+
+Pitch zero: rest the chassis upright with wheels off and run
+--calibrate-pitch (or python gyro.py --calibrate-pitch). The stored
+offset is subtracted from fused pitch so standing-straight is near 0.
 """
 
 from __future__ import annotations
@@ -27,12 +29,12 @@ from scipy.io import loadmat
 from control import ss, c2d
 
 import gyro
+from logger import add_print_args, apply_print_args, log
 
 Ts = 0.01  # Sampling time (s)
 MAX_U = 2.65  # stall torque Nm
 WARM_UP_SECONDS = 3.0
-CONTROLLER_MAT = Path("hInfSynController.mat")
-MADGWICK_B = 0.8  # constructor arg only; imusensor does not apply this to beta
+CONTROLLER_MAT = gyro.CONFIG_DIR / "hInfSynController.mat"
 
 rightMotor = None
 leftMotor = None
@@ -58,9 +60,9 @@ class Encoder:
         else:
             self.direction = "forward"
         if self.counter >= 1120:
-            print("One cycle completed")
+            log("One cycle completed")
             self.counter = 0
-            print("I am moving ", self.direction)
+            log("I am moving ", self.direction)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -93,10 +95,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not load calib.json; use IMU default scale/bias.",
     )
+    parser.add_argument(
+        "--calibrate-pitch",
+        action="store_true",
+        help=(
+            "Average fused pitch while still and save pitch_offset.json. "
+            "Rest the robot upright with wheels off. Does not start motors."
+        ),
+    )
+    parser.add_argument(
+        "--no-pitch-offset",
+        action="store_true",
+        help="Do not load or apply pitch_offset.json.",
+    )
     parser.add_argument("--bus", type=int, default=gyro.I2C_BUS)
     parser.add_argument(
         "--address", type=lambda s: int(s, 0), default=gyro.IMU_ADDRESS
     )
+    add_print_args(parser)
     parser.add_argument(
         "--mat",
         type=Path,
@@ -126,7 +142,7 @@ def setup_imu(
 
 def setup_fusion():
     """Madgwick filter for tilt (theta) and yaw (psi)."""
-    return gyro.make_fusion(MADGWICK_B)
+    return gyro.make_fusion()
 
 
 def load_hinf(mat_path: Path = CONTROLLER_MAT, ts: float = Ts):
@@ -156,9 +172,9 @@ def setup_motors():
 def apply_control(u):
     # u is (2,1) array: u[0] for common mode (forward/tilt control), u[1] for diff mode (yaw control)
     # Scale u to motor speeds: Assume u in [-max_u, max_u] maps to [-1,1] speed
-    print("raw u", u)
+    log("raw u", u)
     u_scaled = u / MAX_U
-    print("scaled u", u_scaled)
+    log("scaled u", u_scaled)
     left_speed = np.clip(u_scaled[0] + u_scaled[1], -1.0, 1.0).item()  # Common + diff
     right_speed = np.clip(u_scaled[0] - u_scaled[1], -1.0, 1.0).item()  # Common - diff (adjust sign if yaw direction wrong)
 
@@ -183,13 +199,19 @@ def apply_control(u):
         rightMotor.stop()
         rightMotorpwm.value = 0.0
 
-    print(f"Control: left_speed={left_speed:.2f}, right_speed={right_speed:.2f}")
+    log(f"Control: left_speed={left_speed:.2f}, right_speed={right_speed:.2f}")
     return left_speed, right_speed
 
 
-def warm_up(imu, sensorfusion, ts: float = Ts, seconds: float = WARM_UP_SECONDS):
+def warm_up(
+    imu,
+    sensorfusion,
+    ts: float = Ts,
+    seconds: float = WARM_UP_SECONDS,
+    pitch_offset: float = 0.0,
+):
     """Prime Madgwick while the robot is still. Does not calibrate the IMU."""
-    print("Warming up sensor fusion (keep robot still)...")
+    log("Warming up sensor fusion (keep robot still)...")
     warm_up_steps = int(seconds / ts)
     pitch_samples = []
     currTime = time.time()
@@ -197,22 +219,24 @@ def warm_up(imu, sensorfusion, ts: float = Ts, seconds: float = WARM_UP_SECONDS)
         newTime = time.time()
         dt = newTime - currTime
         currTime = newTime
-        sample = gyro.fuse_sample(imu, sensorfusion, dt)
+        sample = gyro.fuse_sample(
+            imu, sensorfusion, dt, pitch_offset=pitch_offset
+        )
         pitch_samples.append(sample["pitch"])
         time.sleep(ts)
-    print("Warm-up complete")
+    log("Warm-up complete")
     return pitch_samples
 
 
 def control_step(sample, yaw_initial, r, Ad, Bd, Cd, Dd, x_k, first_run):
     """One balance iteration from a fused IMU sample. Returns updated state."""
-    pitch = sample["pitch"]  # Theta (tilt), degrees
+    pitch = sample["pitch"]  # Theta (tilt), degrees, after pitch offset
     yaw = sample["yaw"]
     if first_run:
         yaw_initial = yaw
         first_run = False
     yaw_relative = yaw - yaw_initial  # Psi (relative yaw)
-    print(f"Pitch: {pitch:.2f}, Yaw: {yaw_relative:.2f}")
+    log(f"Pitch: {pitch:.2f}, Yaw: {yaw_relative:.2f}")
 
     theta_rad = np.deg2rad(pitch)
     psi_rad = np.deg2rad(yaw_relative)
@@ -236,6 +260,7 @@ def stop_motors():
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    apply_print_args(args)
     path, required = gyro.resolve_calib_args(args)
     imu = setup_imu(
         path,
@@ -245,6 +270,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     sensorfusion = setup_fusion()
 
+    if args.calibrate_pitch:
+        gyro.calibrate_pitch_offset(imu, sensorfusion, period=Ts)
+        return 0
+
+    pitch_offset = 0.0 if args.no_pitch_offset else gyro.load_pitch_offset()
+
     Ad, Bd, Cd, Dd = load_hinf(args.mat, Ts)
     n_states = Ad.shape[0]
     x_k = np.zeros((n_states, 1))
@@ -252,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     r = np.array([[0.0], [0.0]])  # theta=0 (upright), psi=0 (desired yaw)
 
     setup_motors()
-    warm_up(imu, sensorfusion, Ts, WARM_UP_SECONDS)
+    warm_up(imu, sensorfusion, Ts, WARM_UP_SECONDS, pitch_offset=pitch_offset)
 
     currTime = time.time()
     first_run = True
@@ -262,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
             newTime = time.time()
             dt = newTime - currTime
             currTime = newTime
-            sample = gyro.fuse_sample(imu, sensorfusion, dt)
+            sample = gyro.fuse_sample(
+                imu, sensorfusion, dt, pitch_offset=pitch_offset
+            )
             u, x_k, yaw_initial, first_run, _yaw_relative = control_step(
                 sample, yaw_initial, r, Ad, Bd, Cd, Dd, x_k, first_run
             )
@@ -271,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
             if elapsed < Ts:
                 time.sleep(Ts - elapsed)
     except KeyboardInterrupt:
-        print("Terminated")
+        log("Terminated")
         stop_motors()
         return 0
 
